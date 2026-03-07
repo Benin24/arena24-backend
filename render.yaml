@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: arena24-backend
+    env: node
+    buildCommand: npm install
+    startCommand: node src/server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: FRONTEND_URL
+        value: https://arena24.in
+      - key: APP_URL
+        value: https://arena24-backend.onrender.com
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM
+        value: Arena 24 <noreply@arena24.in>
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 7d
