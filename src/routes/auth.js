@@ -34,13 +34,19 @@ router.post('/register', registerLimiter, [
 
   try {
     // Check existing user
-    const { data: existing } = await supabase
+    const { data: existingEmail } = await supabase
       .from('users')
       .select('id')
-      .or(`email.eq.${email},username.eq.${username}`)
-      .single();
+      .eq('email', email)
+      .maybeSingle();
 
-    if (existing) {
+    const { data: existingUsername } = await supabase
+      .from('users')
+      .select('id')
+      .eq('username', username)
+      .maybeSingle();
+
+    if (existingEmail || existingUsername) {
       return res.status(409).json({ success: false, message: 'Email or username already registered.' });
     }
 
@@ -72,7 +78,18 @@ router.post('/register', registerLimiter, [
 
     if (error) throw error;
 
-    await sendVerificationEmail(email, username, verifyToken);
+    // ─── FIX: Send email AFTER insert, but DELETE user on failure ─────────────
+    try {
+      await sendVerificationEmail(email, username, verifyToken);
+    } catch (emailErr) {
+      console.error('Email send failed, rolling back user creation:', emailErr.message);
+      // Delete the just-created user so they can retry registration
+      await supabase.from('users').delete().eq('id', user.id);
+      return res.status(500).json({
+        success: false,
+        message: 'Registration failed: could not send verification email. Please try again or contact support.'
+      });
+    }
 
     res.status(201).json({
       success: true,
@@ -95,7 +112,7 @@ router.get('/verify/:token', async (req, res) => {
       .from('users')
       .select('id, email_verified, verify_token_expires')
       .eq('verify_token', token)
-      .single();
+      .maybeSingle();  // FIX: use maybeSingle instead of single to avoid PGRST116 errors
 
     if (error || !user) {
       return res.redirect(`${FRONTEND}/login.html?error=invalid_token`);
@@ -116,6 +133,7 @@ router.get('/verify/:token', async (req, res) => {
 
     res.redirect(`${FRONTEND}/login.html?message=email_verified`);
   } catch (err) {
+    console.error('Verify error:', err);
     res.redirect(`${FRONTEND}/login.html?error=server_error`);
   }
 });
@@ -133,13 +151,23 @@ router.post('/login', loginLimiter, [
   const { email, password } = req.body;
 
   try {
+    // ─── FIX: use maybeSingle() — .single() throws PGRST116 on no rows
+    // which can cause inconsistent behaviour; maybeSingle returns null cleanly
     const { data: user, error } = await supabase
       .from('users')
       .select('id, username, email, password_hash, role, email_verified, banned, upi_id, phone, ign, avatar_url, created_at')
       .eq('email', email)
-      .single();
+      .maybeSingle();
 
-    if (error || !user) {
+    // ─── FIX: explicit null check — don't rely on error alone
+    if (error) {
+      console.error('Login DB error:', error);
+      return res.status(500).json({ success: false, message: 'Login failed. Try again.' });
+    }
+
+    if (!user) {
+      // Use a timing-safe delay to prevent user enumeration
+      await bcrypt.hash('dummy_prevent_timing_attack', 12);
       return res.status(401).json({ success: false, message: 'Invalid email or password.' });
     }
 
@@ -153,8 +181,8 @@ router.post('/login', loginLimiter, [
     }
 
     if (!user.email_verified) {
-      return res.status(403).json({ 
-        success: false, 
+      return res.status(403).json({
+        success: false,
         message: 'Please verify your email first. Check your inbox.',
         requiresVerification: true
       });
@@ -186,7 +214,6 @@ router.post('/login', loginLimiter, [
 
 // ─── POST /api/auth/logout ────────────────────────────────────────────────────
 router.post('/logout', authenticate, (req, res) => {
-  // JWT is stateless — client must delete the token
   res.json({ success: true, message: 'Logged out successfully.' });
 });
 
@@ -209,12 +236,12 @@ router.post('/forgot-password', forgotPasswordLimiter, [
       .from('users')
       .select('id, username')
       .eq('email', email)
-      .single();
+      .maybeSingle();
 
     if (!user) return;
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    const resetExpires = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+    const resetExpires = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
     await supabase
       .from('users')
@@ -245,7 +272,7 @@ router.post('/reset-password', [
       .from('users')
       .select('id, reset_token_expires')
       .eq('reset_token', token)
-      .single();
+      .maybeSingle();
 
     if (!user || new Date(user.reset_token_expires) < new Date()) {
       return res.status(400).json({ success: false, message: 'Reset link is invalid or expired.' });
